@@ -1,0 +1,27 @@
+---
+title: "Driveline Data Analysis"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(magrittr)
+
+here::i_am("baseball_biomechanics/Analysis_Files/driveline_analysis.Rmd")
+
+joint_angles <- read_csv(here("baseball_biomechanics/Data/joint_angles.csv"))
+```
+## Shoulder Angle
+
+```{r}
+pitches <- unique(joint_angles$session_pitch)
+
+joint_angles %>% 
+        filter(session_pitch %in% pitches[1:100]) %>%
+        #filter(session_pitch == "1031_2") %>%
+        ggplot(aes(x = time, y = shoulder_angle_z)) +
+        geom_path(alpha = 0.2) +
+        theme(legend.position = "none")
+```
+
