@@ -1,0 +1,503 @@
+---
+title: "FDA Baseball"
+output: html_document
+date: "2025-02-25"
+---
+
+# Driveline FDA analysis
+
+Read in data and plot some raw data - here i've chosen shoulder angle z.
+
+```{r}
+# install.packages("fda") # install the fda package
+# install.packages("refund") # install the refund package
+
+library(fda)
+library(refund)
+library(tidyverse)
+library(here)
+library(magrittr)
+library(viridis)
+
+here::i_am("baseball_biomechanics/Analysis_Files/FDA Baseball.Rmd")
+
+joint_angles <- read_csv(here("baseball_biomechanics/Data/joint_angles.csv"))
+poi_metrics <- read_csv(here("baseball_biomechanics/Data/poi_metrics.csv"))
+#landmarks <- read_csv(here("baseball_biomechanics/Data/landmarks.csv"))
+
+pitches <- unique(joint_angles$session_pitch)
+
+#graph of raw pitches (first 20)
+joint_angles %>% 
+        filter(session_pitch %in% pitches[1:20]) %>%
+        #filter(session_pitch == "1031_2") %>%
+        ggplot(aes(x = time, y = shoulder_angle_z, colour = session_pitch)) +
+        geom_line(alpha = 0.6) +
+        theme(legend.position = "none")
+
+# extract the row when ball was released, and foot plant for each pitch, used in graph below
+shoulder_at_br <- joint_angles %>% 
+                  group_by(session_pitch) %>%
+                  mutate(sh_rot_br = case_when(time == BR_time ~ "ball_release", 
+                                               TRUE ~ NA)) %>%
+                  filter(sh_rot_br == "ball_release")
+
+shoulder_at_fp10 <- joint_angles %>% 
+                  group_by(session_pitch) %>%
+                  mutate(sh_rot_fp_10 = case_when(time == fp_10_time ~ "fp_10", 
+                                               TRUE ~ NA)) %>%
+                  filter(sh_rot_fp_10 == "fp_10")
+
+shoulder_at_fp100 <- joint_angles %>% 
+                  group_by(session_pitch) %>%
+                  mutate(sh_rot_fp_100 = case_when(time == fp_100_time ~ "fp_100", 
+                                               TRUE ~ NA)) %>%
+                  filter(sh_rot_fp_100 == "fp_100")
+
+# graph showing fp_10, fp_100, and ball release on each pitch. only first 5 pitches selected
+joint_angles %>% 
+        filter(session_pitch %in% pitches[c(1:5)]) %>%
+        #filter(session_pitch == "1031_2") %>%
+        ggplot(aes(x = time, y = shoulder_angle_z, colour = session_pitch)) +
+        geom_line(alpha = 0.6) +
+        geom_point(data = filter(shoulder_at_br, session_pitch %in% pitches[1:5]), aes(x = BR_time, y = shoulder_angle_z), colour = "black", alpha = 0.6) +
+        geom_point(data = filter(shoulder_at_fp10, session_pitch %in% pitches[1:5]), aes(x = fp_10_time, y = shoulder_angle_z), colour = "red", alpha = 0.6) +
+        geom_point(data = filter(shoulder_at_fp100, session_pitch %in% pitches[1:5]), aes(x = fp_100_time, y = shoulder_angle_z), colour = "blue", alpha = 0.6) +
+        theme(legend.position = "none")
+
+joint_angles %<>% select(session_pitch, time, shoulder_angle_z, fp_10_time, fp_100_time, MER_time, BR_time, MIR_time)
+
+```
+
+### Align pitches
+
+## I commented this out as I will leave it to the registration step to align the pitches ## 
+
+As the pitches are not aligned in time, transform the data so that max shoulder angle z occurs at time 0. This aligns the data.
+
+```{r}
+# 1. Find the time of the maximum joint angle for each pitch
+# transformed_data <- joint_angles %>%
+#   select(session_pitch, time, shoulder_angle_z) %>%
+#   group_by(session_pitch) %>%
+#   mutate(max_angle_time = time[which.max(shoulder_angle_z)],  # Find the time where the max angle occurs
+#          time_aligned = time - max_angle_time) %>%        # Align all times so max is at time 0
+#   ungroup()
+# 
+# transformed_data %<>% left_join(poi_metrics, by = "session_pitch")
+# 
+# transformed_data %>% 
+#         filter(session_pitch %in% pitches[1:20]) %>%
+#         ggplot(aes(x = time_aligned, y = shoulder_angle_z, colour = pitch_speed_mph, group = session_pitch)) +
+#         geom_line(alpha = 0.5) +
+#         scale_color_viridis()
+# 
+# # remove data early in the pitch 
+# transformed_data %<>% filter(time_aligned > -0.25,
+#                              time_aligned < 0.11)
+# 
+# transformed_data %>% 
+#         filter(session_pitch %in% pitches[1:20]) %>%
+#         ggplot(aes(x = time_aligned, y = shoulder_angle_z, colour = pitch_speed_mph, group = session_pitch)) +
+#         geom_line(alpha = 0.5) +
+#         scale_color_viridis()
+```
+
+### Convert data into FDA compatible matrix
+
+A lot of copy/paste of Ed's workshop
+
+```{r}
+
+# # remove data early and late in the pitch based on ball release time
+# this also does a lot of the work to align the pitches. 
+joint_angles_trimmed <- joint_angles %>% group_by(session_pitch) %>%
+  mutate(time_from_br = time - BR_time,
+         time_from_fp = time - fp_10_time) %>%
+  filter(time_from_fp > -0.5, time_from_br < 0.2) %>%
+  filter(!session_pitch %in% c("2918_4", "2918_3")) #this pitch has a weird look about it. 
+
+# filter out any pitches that have NA in fp_10_time (there were a few)
+joint_angles_trimmed <- joint_angles_trimmed %>% group_by(session_pitch) %>%
+  filter(!is.na(fp_10_time))
+
+# check trimmed data
+# replicating 
+joint_angles_trimmed %>% 
+        filter(session_pitch %in% pitches[1:20]) %>%
+        #filter(session_pitch == "1031_2") %>%
+        ggplot(aes(x = time, y = shoulder_angle_z, colour = session_pitch)) + 
+        geom_line(alpha = 0.6) +
+        geom_point(data = filter(shoulder_at_br, session_pitch %in% pitches[1:20]), aes(x = BR_time, y = shoulder_angle_z), colour = "black", alpha = 0.6) +
+        theme(legend.position = "none")
+
+#convert to a matrix
+fda_matrix <- joint_angles_trimmed %>% 
+  mutate(time = 1:length(session_pitch)) %>%
+  #group_by(session_pitch) %>%
+  #mutate(std_time = 1:length(session_pitch)) %>%
+  #ungroup() %>%
+  select(session_pitch, time, shoulder_angle_z) %>%
+  pivot_wider(names_from = session_pitch, values_from = shoulder_angle_z)
+
+fda_matrix <- as.matrix(fda_matrix)
+```
+
+
+```{r}
+
+t_grid <- as.numeric(fda_matrix[,1])
+row.names(fda_matrix) <- t_grid #change row name sto t_grid (may be an unnessessary step?)
+fda_matrix <- fda_matrix[1:423,2:402] # starts at 2 to exclude the time column
+t_grid <- as.numeric(1:423) 
+
+
+matplot(x = t_grid, 
+        y = fda_matrix,
+        type = "b", # both lines and points
+        pch = 20, # dots for points
+        xlab = "Normalised time",
+        ylab = "Shoulder angle (deg)")
+
+# bspl_101 <- create.bspline.basis(rangeval = range(t_grid), nbasis = 100, norder = 4)
+# ols_fdSmooth <- smooth.basis(argvals = t_grid, y = fda_matrix, fdParobj = bspl_101)
+# ols_fd <- ols_fdSmooth$fd # or ols_fdSmooth[["fd]]
+# plot(ols_fd[1:3,],
+#      xlab = "Normalised time (prop. of gait cycle)",
+#      ylab = "Hip angle (deg)")
+# matpoints(x = t_grid, y = fda_matrix[, 1:3], pch = 20) # overlay
+```
+
+```{r}
+# plot(t_grid, fda_matrix[,1],  # plot raw data (1st curve)
+#      pch = 20,
+#     xlab = "Normalised time (prop. of gait cycle)",
+#     ylab = "Hip angle (deg)")
+     
+# K_seq <- seq(4, 20, by = 2)
+
+# for(Ki in seq_along(K_seq)) {
+#   bspl_K <- create.bspline.basis(rangeval = range(t_grid), nbasis = K_seq[Ki], norder = 4)
+#   ols_fdSmooth_K <- smooth.basis(argvals = t_grid, y = fda_matrix[,1], fdParobj = bspl_K)
+#   lines(ols_fdSmooth_K$fd, col = Ki)
+# }
+# legend("top", legend = paste0("K = ", K_seq), col = seq_along(K_seq), lty = 1)
+```
+
+### P-OLS
+
+```{r}
+# create a new smooth.basis object with penalised OLS
+bspl_100 <- create.bspline.basis(rangeval = range(t_grid), nbasis = 100, norder = 4) # change nbasis values
+fdParobj_pols <-fdPar(fdobj = bspl_100, Lfdobj = int2Lfd(m = 2), lambda = 1)
+pls_fdSmooth <- smooth.basis(argvals = t_grid, y = fda_matrix, fdParobj = fdParobj_pols)
+
+
+# Get best lamba value for the above function
+# create vcector to store the GCV values:
+log10_lambda_range <- seq(-10, 6, by = 2)
+lambda_range <- 10^log10_lambda_range
+n_lambda <- length(lambda_range) # how many values we're trialling
+gcv_vec <- vector(mode = "numeric", length = n_lambda)
+
+for(lam in seq_len(n_lambda)) {
+  # loop through different lambdas
+  fdParobj_lam <- fdPar(fdobj = bspl_100, 
+                        Lfdobj = int2Lfd(m = 2),
+                        lambda = lambda_range[lam]) # create fdPar with chosen lambda
+  # do p-ols with chosen lambda:
+  pls_fdSmooth_lam <- smooth.basis(argvals = t_grid, y = fda_matrix, fdParobj = fdParobj_lam)
+  # store resulting GCV:
+  gcv_vec[lam] <- mean(pls_fdSmooth_lam$gcv)
+}
+
+plot(log10_lambda_range, 
+     y = gcv_vec, 
+     type = "b", 
+     xlab = expression(log[10](lambda)), 
+     ylab = "GCV")
+best_lambda_index <- which.min(gcv_vec)
+abline(v = log10_lambda_range[best_lambda_index])
+```
+
+Implement the lamba value found above using generalised CV
+
+```{r}
+fdParobj_final <- fdPar(fdobj = bspl_100, 
+                        Lfdobj = int2Lfd(m = 2),
+                        lambda = lambda_range[best_lambda_index]) # create fdPar with chosen 
+pls_fdSmooth_final <- smooth.basis(argvals = t_grid, y = fda_matrix, fdParobj = fdParobj_final)
+final_fd <- pls_fdSmooth_final$fd
+```
+
+
+```{r}
+# define coarse grid
+t_grid_coarse <- seq(min(t_grid), max(t_grid), length.out = 10)
+# evaluate on that grid
+eval.fd(evalarg = t_grid_coarse, fdobj = final_fd)
+
+mean_fd <- mean.fd(x = final_fd)
+final_coef <- final_fd$coef # extract coefficients
+mean_coef <- apply(final_coef, 1, mean) # average them
+mean_fd_02 <- fd(coef = mean_coef, basisobj = final_fd$basis) # create mean fd object manually
+
+plot(final_fd)
+lines(mean_fd, lwd = 3)
+lines(mean_fd_02, lwd = 3)
+
+boxplot.fd(x = final_fd)
+```
+
+## Registration
+
+Need to get the landmark registration data. IE the foot plant time and ball release time. 
+
+```{r}
+#get the angle and time where fp occurs
+lm_fp <- joint_angles_trimmed %>% group_by(session_pitch) %>%
+  mutate(time_std = 1:length(time)) %>%
+  filter(time == fp_10_time)
+#lm_fp <- lm_fp[1:99,]
+
+# get the angle and time when br occurs
+lm_br <- joint_angles_trimmed %>% group_by(session_pitch) %>%
+  mutate(time_std = 1:length(time)) %>%
+  filter(time == BR_time)
+#lm_br <- lm_br[1:99,]
+
+# Replicating the plot in the registration workshop practical (picking out the landmarks)
+t_min <- as.numeric(unlist(lm_fp[, 10]))
+y_min_value <- as.numeric(unlist(lm_fp[, 3]))
+t_max <- as.numeric(unlist(lm_br[, 10]))
+y_max_value <- as.numeric(unlist(lm_br[, 3]))
+
+inds_obs_plot <- c(1, 11, 21) # indices of three observations to plot
+plot(final_fd[inds_obs_plot], xlab = "t", ylab = "force (bw)")
+points(t_min[inds_obs_plot], y_min_value[inds_obs_plot], col = c(1:3), cex = 1.5, pch = 20)
+points(t_max[inds_obs_plot], y_max_value[inds_obs_plot], col = c(1:3), cex = 1.5, pch = 20)
+
+
+#Set the foot plant and ball release data into a matrix
+ximarks_mat <- matrix(data = NA, nrow = 402, ncol = 2) # set up empty matrix
+ximarks_mat[, 1] <- lm_fp$time_std
+ximarks_mat[, 2] <- lm_br$time_std
+
+
+
+
+# im not sure what this is doing. From the workshop - "A vector of length NL of times of landmarks for target curve – here as targets we’ll just use the mean average of each landmark timing"
+x0marks_vec <- c(mean(lm_fp$time_std), mean(lm_br$time_std))
+
+
+bspline_basis_wfd <- create.bspline.basis(rangeval = c(1, 423),
+                                          breaks = c(1, mean(lm_fp$time_std), 
+                                                     mean(lm_br$time_std), 423),
+                                          norder = 4)
+
+# Wfdpar (and Wfd0par): a functional parameter object defining the (inverse) warping functions. For this we first set up a B-spline basis with interior knots at the mean values of the two landmarks using the breaks argument.
+
+WfdLM <- fd(coef = matrix(0, bspline_basis_wfd$nbasis, 1), 
+            basisobj =  bspline_basis_wfd) # are these initial guesses
+
+WfdParLM <- fdPar(fdobj = WfdLM, Lfdobj = int2Lfd(2), lambda = 1e-6)
+
+# New landmark reg function
+source(here("baseball_biomechanics/landmark-reg-updated.R"))
+
+fast_reg <- landmarkreg_u(fdobj = final_fd,
+                    ximarks = ximarks_mat,
+                    x0marks = x0marks_vec,
+                    WfdPar = WfdParLM,
+                    monwrd = 0)
+
+# landmark_reg_obj <- landmarkreg(
+#   unregfd = final_fd, 
+#   ximarks = ximarks_mat,
+#   x0marks = x0marks_vec,
+#   WfdPar = WfdParLM,
+#   WfdPar0 = WfdParLM,
+#   x0lim = c(0, 423),
+#   ylambda = 1e-8)
+
+```
+
+#### Examining the registered curves
+
+```{r}
+# extract
+reg_fd <- fast_reg$regfd
+warp_fd <- fast_reg$warpfd
+
+par(mfrow = c(1, 2))
+plot(final_fd)
+
+title("Unregistered curves")
+
+plot(reg_fd)
+
+abline(v = x0marks_vec, col = "grey")
+title("Registered curves")
+
+# replicating the previous 3 curve plot 
+
+par(mfrow = c(1, 2))
+plot(final_fd[inds_obs_plot, ])
+points(t_min[inds_obs_plot], y_min_value[inds_obs_plot], col = c(1:3), cex = 1.5, pch = 20)
+points(t_max[inds_obs_plot], y_max_value[inds_obs_plot], col = c(1:3), cex = 1.5, pch = 20)
+title("Unregistered curves")
+
+plot(reg_fd[inds_obs_plot,])
+
+abline(v = x0marks_vec, col = "grey")
+points(rep(mean(t_min), 3), y_min_value[inds_obs_plot], col = c(1:3), cex = 1.5, pch = 20)
+points(rep(mean(t_max), 3), y_max_value[inds_obs_plot], col = c(1:3), cex = 1.5, pch = 20)
+title("Registered curves")
+
+
+
+```
+#### Warping function 
+
+```{r}
+plot(warp_fd)
+plot(warp_fd[inds_obs_plot,])
+```
+
+#### Analysis of phase variation
+
+Note I use handedness (in place of sex from the practical), there are 27 L and 72 R in the sample. Ball release graph looks strange. this is because earlier I standardised the curves based on BR (ie curve starts and ends 0.4 sec before BR and 0.2 second after) so there is no variation in this. 
+
+```{r}
+par(mfrow = c(1, 2))
+boxplot(t_min ~ poi_metrics$p_throws[1:99],
+        col = c("red4", "cornflowerblue"),
+        xlab = "handedness", 
+        ylab = "landmark time: foot plant")
+boxplot(t_max ~ poi_metrics$p_throws[1:99],
+        col = c("red4", "cornflowerblue"),
+        xlab = "sex", 
+        ylab = "landmark time: ball release")
+```
+
+
+```{r}
+plot(warp_fd[1,])
+lines(warp_fd, col = ifelse(poi_metrics$p_throws[1:99] == "L", "red4", "cornflowerblue"), lty = 1)
+
+
+
+```
+
+## FPCA
+
+```{r}
+cov_grf_bifd <- var.fd(fdobj1 = warp_fd)
+cov_grf_eval <- eval.bifd(sevalarg = t_grid, tevalarg = t_grid, bifd = cov_grf_bifd)
+filled.contour(x = 1:178, y = 1:178, z = cov_grf_eval, xlab = "s", ylab = "t")
+```
+
+The graph shows pointwise variance, with the highest variance between 0 and 50, which makes sense as this is the phase before foot plant and mechanics of pitching can vary a lot at this stage. If we run the warp_fd through the graph we see the highest variance at 50-100. This is the area with the most warping. 
+
+### Applying FPCA
+
+```{r}
+pitching_pca.fd <- pca.fd(fdobj = reg_fd, nharm = 6)
+pitching_funs_fd <- pitching_pca.fd$harmonics
+
+#The FPC scores are returned in an N x 6 matrix
+pitching_fpc_scores <- pitching_pca.fd$scores
+
+#The eigenvalues, which represent the amount of variance explained by the FPCs, are contained in a vector called values
+pitching_eigenvalues <- pitching_pca.fd$values
+# actually shows all possible values, we just want first 6
+pitching_eigenvalues <- pitching_eigenvalues[1:6]
+
+#The normalised eigenvalues that represent the proportion of variance explained are contained in the vector called varprop
+pitching_varprop <- pitching_pca.fd$varprop
+```
+
+### Describing the FPCA
+
+```{r}
+info_df <- data.frame(`FPC Number` = 1:6,
+           `Eigenvalue` = round(pitching_eigenvalues, 2),
+           `Proportion of Variance` = round(pitching_varprop, 2),
+           `Cumulative Proportion of Variance` = cumsum(round(pitching_varprop, 2)))
+
+info_df
+```
+
+```{r}
+par(mfrow = c(2, 3))
+plot.pca.fd(x = pitching_pca.fd)
+```
+
+Relate these to actual pitch data showing pitches with highest and lowest FPC scores
+
+```{r}
+pitching_fpc1_score <- pitching_fpc_scores[,1]
+max_ind <- which.max(pitching_fpc1_score)
+min_ind <- which.min(pitching_fpc1_score)
+
+par(mfrow = c(1, 2))
+plot.pca.fd(x = pitching_pca.fd, harm = 1)
+plot(reg_fd[c(min_ind, max_ind)])
+legend("bottom", 
+       col = c(1,2), 
+       lty = c(1, 2), 
+       legend = c("Min FPC1 score", "Max FPC1 score"),
+       "Lowest and Highest FPC1 Scorers")
+```
+
+### FPCs as basis functions
+
+```{r}
+mean_pitching_fd <- mean.fd(x = reg_fd)
+subject_1_scores <- pitching_fpc_scores[1, ]
+new_coefs <- as.vector(subject_1_scores %*% t(pitching_funs_fd$coefs))
+scores_times_fpcs_fd <- fd(coef = new_coefs, basisobj = pitching_funs_fd$basis)
+approximation_subject_1_fd <- mean_pitching_fd + scores_times_fpcs_fd
+
+plot(approximation_subject_1_fd)
+lines(reg_fd[1,], lty = 2)
+legend("bottom", c("True", "FPC Approx"), lty = c(2, 1))
+```
+
+## Functional regression
+### Scalar-on-function regression 
+
+```{r}
+# outcome variable
+pitch_speed <- poi_metrics$pitch_speed_mph[1:99]
+
+# take the FPCA scores and combine with outcome variable into a new dataframe
+
+fpcr_df <- data.frame(pitching_fpc_scores, pitch_speed)
+names(fpcr_df)[1:6] <- paste0("fpc_", 1:6)
+names(fpcr_df)[7] <- "pitch_speed"
+
+#create the model
+fpcr_lm <- lm(formula = pitch_speed ~ fpc_1 + fpc_2 + fpc_3 + fpc_4 + fpc_5 + fpc_6, 
+   data = fpcr_df)
+summary(fpcr_lm)
+```
+
+There is a better way
+
+```{r}
+library(refund)
+
+pitch_fd_eval <- t(eval.fd(evalarg = 1:99, fdobj = reg_fd))
+pfr_fit <- pfr(pitch_speed ~ lf(X = pitch_fd_eval, bs = "bs", k = 35, argvals = 1:99))
+summary(pfr_fit)
+
+plot(pfr_fit, xlab = "t", ylab = expression(beta(t)))
+abline(h =0, lty = 3)
+```
+
+This does not do a great job of predicting pitch speed. The r-squared is 0.06. Basically no relationship at all. 
+
+An additional step we can take is to include other joint metrics (angles, velocities etc) to build a multiple linear model. This could improve the prediction accuracy if the metrics are related to pitch speed. I guessed that rate of change in shoulder rotation (current data) would relate to pitch speed, it does not. What other metrics may influence speed? 
+
+
